@@ -5,16 +5,127 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: "20mb" }));
-app.post("/api/v1/asignaciones", async (req, res) => {
 
-    const transaction = new sql.Transaction(pool);
+// ======================================
+// CONFIGURACION DE SQL SERVER 2008 SP2
+// ======================================
+
+const dbConfig = {
+    server: process.env.DB_SERVER,
+    port: Number(process.env.DB_PORT || 1433),
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+
+    options: {
+        encrypt: process.env.DB_ENCRYPT === "true",
+        trustServerCertificate:
+            process.env.DB_TRUST_CERT === "true",
+        enableArithAbort: true
+    },
+
+    pool: {
+        max: 10,
+        min: 0,
+        idleTimeoutMillis: 30000
+    },
+
+    connectionTimeout: 30000,
+    requestTimeout: 120000
+};
+
+// Crear un solo pool de conexiones
+let poolPromise;
+
+function getPool() {
+    if (!poolPromise) {
+        poolPromise = new sql.ConnectionPool(dbConfig)
+            .connect()
+            .catch(error => {
+                poolPromise = null;
+                throw error;
+            });
+    }
+
+    return poolPromise;
+}
+
+// ======================================
+// SEGURIDAD API KEY
+// ======================================
+
+function autenticar(req, res, next) {
+    const apiKey = process.env.API_KEY;
+
+    if (!apiKey) {
+        return res.status(500).json({
+            ok: false,
+            mensaje: "Falta configurar API_KEY en Render"
+        });
+    }
+
+    if (req.headers["x-api-key"] !== apiKey) {
+        return res.status(401).json({
+            ok: false,
+            mensaje: "No autorizado"
+        });
+    }
+
+    next();
+}
+
+// ======================================
+// RUTA PRINCIPAL
+// ======================================
+
+app.get("/", (req, res) => {
+    res.json({
+        ok: true,
+        servicio: "API Asignaciones V2",
+        estado: "activo"
+    });
+});
+
+// ======================================
+// COMPROBAR CONEXION SQL
+// ======================================
+
+app.get("/health", async (req, res) => {
+    try {
+        const pool = await getPool();
+
+        await pool.request().query("SELECT 1 AS Conexion");
+
+        res.json({
+            ok: true,
+            mensaje: "Conexión a SQL Server correcta"
+        });
+
+    } catch (error) {
+        console.error("Error de conexión SQL:", error);
+
+        res.status(503).json({
+            ok: false,
+            mensaje: "Sin conexión a SQL Server",
+            detalle: error.message
+        });
+    }
+});
+
+// ======================================
+// RECIBIR Y PROCESAR ASIGNACIONES
+// ======================================
+
+app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
+
+    let transaction;
+    let transactionIniciada = false;
 
     try {
         console.log("[POST] Procesando asignaciones");
 
         const datos = req.body;
 
-        // Validar estructura principal
         if (!Array.isArray(datos) || datos.length === 0) {
             return res.status(400).json({
                 ok: false,
@@ -24,10 +135,13 @@ app.post("/api/v1/asignaciones", async (req, res) => {
 
         const clientesVistos = new Set();
 
-        // Validar todos los registros antes de iniciar la transacción
+        // Validar estructura antes de modificar la base
         for (const item of datos) {
 
-            if (!item.cliente || !item.cliente.numero) {
+            if (!item.cliente || item.cliente.numero === undefined ||
+                item.cliente.numero === null ||
+                String(item.cliente.numero).trim() === "") {
+
                 return res.status(400).json({
                     ok: false,
                     mensaje: "Cada registro debe contener cliente.numero"
@@ -36,10 +150,18 @@ app.post("/api/v1/asignaciones", async (req, res) => {
 
             const numero = String(item.cliente.numero).trim();
 
+            if (numero.length > 30) {
+                return res.status(400).json({
+                    ok: false,
+                    mensaje: "NumeroCliente excede 30 caracteres",
+                    numeroCliente: numero
+                });
+            }
+
             if (clientesVistos.has(numero)) {
                 return res.status(400).json({
                     ok: false,
-                    mensaje: "NumeroCliente duplicado dentro del mismo archivo: " + numero
+                    mensaje: "NumeroCliente duplicado: " + numero
                 });
             }
 
@@ -57,7 +179,13 @@ app.post("/api/v1/asignaciones", async (req, res) => {
             }
         }
 
-        await transaction.begin();
+        // Conectar a SQL Server
+        const pool = await getPool();
+
+        transaction = new sql.Transaction(pool);
+
+        await transaction.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
+        transactionIniciada = true;
 
         let insertados = 0;
         let actualizados = 0;
@@ -65,7 +193,6 @@ app.post("/api/v1/asignaciones", async (req, res) => {
         for (const item of datos) {
 
             const cliente = item.cliente;
-
             const numero = String(cliente.numero).trim();
 
             const ingresos =
@@ -75,11 +202,18 @@ app.post("/api/v1/asignaciones", async (req, res) => {
                     ? null
                     : Number(cliente.ingresos);
 
-            if (ingresos !== null && !Number.isFinite(ingresos)) {
+            if (ingresos !== null &&
+                (!Number.isFinite(ingresos) ||
+                 Math.abs(ingresos) >= 100000000000000)) {
+
                 throw new Error(
                     "Ingresos inválidos para cliente " + numero
                 );
             }
+
+            const nombreArchivo =
+                String(req.headers["x-filename"] || "archivo.json")
+                    .substring(0, 510);
 
             const request = new sql.Request(transaction);
 
@@ -112,12 +246,11 @@ app.post("/api/v1/asignaciones", async (req, res) => {
             request.input(
                 "NombreArchivo",
                 sql.NVarChar(510),
-                req.headers["x-filename"] || "archivo.json"
+                nombreArchivo
             );
 
             const resultado = await request.query(`
                 DECLARE @Existe BIT;
-
                 SET @Existe = 0;
 
                 IF EXISTS (
@@ -186,6 +319,9 @@ app.post("/api/v1/asignaciones", async (req, res) => {
         }
 
         await transaction.commit();
+        transactionIniciada = false;
+
+        console.log("[POST] Proceso terminado correctamente");
 
         return res.json({
             ok: true,
@@ -197,10 +333,12 @@ app.post("/api/v1/asignaciones", async (req, res) => {
 
     } catch (error) {
 
-        try {
-            await transaction.rollback();
-        } catch (errorRollback) {
-            console.error("Error al revertir transacción:", errorRollback);
+        if (transaction && transactionIniciada) {
+            try {
+                await transaction.rollback();
+            } catch (errorRollback) {
+                console.error("Error al revertir:", errorRollback);
+            }
         }
 
         console.error("Error procesando JSON:", error);
@@ -211,4 +349,62 @@ app.post("/api/v1/asignaciones", async (req, res) => {
             detalle: error.message
         });
     }
+});
+
+// ======================================
+// CONSULTAR CLIENTE POR NUMERO
+// ======================================
+
+app.get("/api/v1/clientes/:numero", autenticar, async (req, res) => {
+    try {
+        const pool = await getPool();
+
+        const resultado = await pool.request()
+            .input(
+                "NumeroCliente",
+                sql.NVarChar(30),
+                req.params.numero
+            )
+            .query(`
+                SELECT *
+                FROM dbo.ClientesAsignacion
+                WHERE NumeroCliente = @NumeroCliente
+            `);
+
+        if (resultado.recordset.length === 0) {
+            return res.status(404).json({
+                ok: false,
+                mensaje: "Cliente no encontrado"
+            });
+        }
+
+        const cliente = resultado.recordset[0];
+
+        res.json({
+            ok: true,
+            cliente: {
+                ...cliente,
+                contrato: JSON.parse(cliente.ContratoJSON || "[]"),
+                telefono: JSON.parse(cliente.TelefonoJSON || "[]"),
+                direccion: JSON.parse(cliente.DireccionJSON || "[]")
+            }
+        });
+
+    } catch (error) {
+        console.error("Error consultando cliente:", error);
+
+        res.status(500).json({
+            ok: false,
+            mensaje: "Error al consultar cliente",
+            detalle: error.message
+        });
+    }
+});
+
+// ======================================
+// INICIAR SERVIDOR
+// ======================================
+
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`API V2 activa en el puerto ${PORT}`);
 });
