@@ -1,14 +1,14 @@
 
 {
-  "name": "api-asignacion-agencias",
+  "name": "api-asignacion-agencias-v2",
   "version": "1.0.0",
-  "description": "API para recibir asignaciones JSON y enviarlas a SQL Server",
+  "private": true,
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.21.2",
-    "mssql": "^10.0.4"
+    "express": "4.21.2",
+    "mssql": "11.0.1"
   }
 }
