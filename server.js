@@ -1,4 +1,10 @@
+const express = require("express");
+const sql = require("mssql");
 
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json({ limit: "20mb" }));
 app.post("/api/v1/asignaciones", async (req, res) => {
 
     const transaction = new sql.Transaction(pool);
