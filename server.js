@@ -1,4 +1,5 @@
 
+
 const express = require("express");
 const sql = require("mssql");
 
@@ -43,6 +44,10 @@ const dbConfig = {
     requestTimeout: 120000
 };
 
+// ======================================
+// POOL DE CONEXIONES
+// ======================================
+
 let poolPromise;
 
 function getPool() {
@@ -59,7 +64,7 @@ function getPool() {
 }
 
 // ======================================
-// FUNCIONES DE VALIDACION
+// AUTENTICACION
 // ======================================
 
 function autenticar(req, res, next) {
@@ -81,6 +86,10 @@ function autenticar(req, res, next) {
 
     next();
 }
+
+// ======================================
+// FUNCIONES DE VALIDACION
+// ======================================
 
 function texto(valor, maximo, campo) {
     if (valor === undefined || valor === null || valor === "") {
@@ -139,7 +148,8 @@ function arreglo(valor, campo, numeroCliente) {
     }
 
     for (const elemento of valor) {
-        if (!elemento || typeof elemento !== "object" ||
+        if (!elemento ||
+            typeof elemento !== "object" ||
             Array.isArray(elemento)) {
             throw new Error(
                 "Elemento inválido en " + campo +
@@ -190,8 +200,7 @@ app.get("/health", async (req, res) => {
 });
 
 // ======================================
-// RECIBIR ASIGNACIONES
-// GUARDA HISTORICO Y DESGLOSA LOS DATOS
+// RECIBIR Y PROCESAR ASIGNACIONES
 // ======================================
 
 app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
@@ -204,6 +213,7 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
 
         const datos = req.body;
 
+        // Validar que el JSON sea un arreglo
         if (!Array.isArray(datos) || datos.length === 0) {
             return res.status(400).json({
                 ok: false,
@@ -211,20 +221,32 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
             });
         }
 
-        // Validar toda la estructura antes de insertar
+        // ======================================
+        // VALIDAR ESTRUCTURA COMPLETA
+        // ======================================
+
         const clientesValidados = [];
 
         for (const item of datos) {
 
-            if (!item || typeof item !== "object" || Array.isArray(item)) {
-                throw new Error("Cada elemento debe ser un objeto de cliente");
+            if (!item ||
+                typeof item !== "object" ||
+                Array.isArray(item)) {
+                throw new Error(
+                    "Cada elemento debe ser un objeto de cliente"
+                );
             }
 
             if (!item.cliente ||
+                typeof item.cliente !== "object" ||
+                Array.isArray(item.cliente) ||
                 item.cliente.numero === undefined ||
                 item.cliente.numero === null ||
                 String(item.cliente.numero).trim() === "") {
-                throw new Error("Cada registro debe contener cliente.numero");
+
+                throw new Error(
+                    "Cada registro debe contener cliente.numero"
+                );
             }
 
             const cliente = item.cliente;
@@ -236,9 +258,23 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
                 );
             }
 
-            const contratos = arreglo(item.contrato, "contrato", numero);
-            const telefonos = arreglo(item.telefono, "telefono", numero);
-            const direcciones = arreglo(item.direccion, "direccion", numero);
+            const contratos = arreglo(
+                item.contrato,
+                "contrato",
+                numero
+            );
+
+            const telefonos = arreglo(
+                item.telefono,
+                "telefono",
+                numero
+            );
+
+            const direcciones = arreglo(
+                item.direccion,
+                "direccion",
+                numero
+            );
 
             clientesValidados.push({
                 cliente,
@@ -249,25 +285,44 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
             });
         }
 
-        // Nombre del archivo enviado en el encabezado
+        // ======================================
+        // DATOS DE LA RECEPCION
+        // ======================================
+
         const nombreArchivo = texto(
             req.headers["x-filename"] || "archivo.json",
             510,
             "NombreArchivo"
         );
 
-        // Guardar exactamente el texto JSON recibido
         const contenidoJSON = req.rawBody || JSON.stringify(datos);
+
+        // ======================================
+        // CONECTAR Y ABRIR TRANSACCION
+        // ======================================
 
         const pool = await getPool();
 
         transaction = new sql.Transaction(pool);
 
-        await transaction.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
+        await transaction.begin(
+            sql.ISOLATION_LEVEL.SERIALIZABLE
+        );
+
         transactionIniciada = true;
 
         // ======================================
-        // 1. GUARDAR RECEPCION ORIGINAL
+        // CONTADORES
+        // ======================================
+
+        let clientesInsertados = 0;
+        let contratosInsertados = 0;
+        let telefonosInsertados = 0;
+        let direccionesInsertadas = 0;
+        let registrosLayout = 0;
+
+        // ======================================
+        // 1. GUARDAR JSON ORIGINAL
         // ======================================
 
         const recepcionRequest = new sql.Request(transaction);
@@ -299,12 +354,8 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
             SELECT CAST(SCOPE_IDENTITY() AS BIGINT) AS IdRecepcion;
         `);
 
-        const idRecepcion = recepcionResultado.recordset[0].IdRecepcion;
-
-        let clientesInsertados = 0;
-        let contratosInsertados = 0;
-        let telefonosInsertados = 0;
-        let direccionesInsertadas = 0;
+        const idRecepcion =
+            recepcionResultado.recordset[0].IdRecepcion;
 
         // ======================================
         // 2. PROCESAR CADA CLIENTE
@@ -318,6 +369,10 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
                 cliente.ingresos,
                 "Ingresos del cliente " + item.numero
             );
+
+            // ======================================
+            // INSERTAR DATOS GENERALES DEL CLIENTE
+            // ======================================
 
             const clienteRequest = new sql.Request(transaction);
 
@@ -403,46 +458,117 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
             clientesInsertados++;
 
             // ======================================
-            // 3. INSERTAR TODOS LOS CONTRATOS
+            // 3. INSERTAR CONTRATOS
             // ======================================
 
             for (const contrato of item.contratos) {
 
                 const r = new sql.Request(transaction);
 
-                r.input("IdClienteRecepcion", sql.BigInt, idClienteRecepcion);
-                r.input("NumeroEmpresa", sql.NVarChar(50),
-                    texto(contrato.numeroEmpresa, 50, "NumeroEmpresa"));
-                r.input("NumeroSucursal", sql.NVarChar(50),
-                    texto(contrato.numeroSucursal, 50, "NumeroSucursal"));
-                r.input("NumeroContrato", sql.NVarChar(50),
-                    texto(contrato.numeroContrato, 50, "NumeroContrato"));
-                r.input("NombreCliente", sql.NVarChar(200),
-                    texto(contrato.nombreCliente, 200, "NombreCliente"));
-                r.input("FrecuenciaPago", sql.NVarChar(50),
-                    texto(contrato.frecuenciaPago, 50, "FrecuenciaPago"));
-                r.input("CapitalInsoluto", sql.Decimal(18, 2),
-                    decimal(contrato.capitalInsoluto, "CapitalInsoluto"));
-                r.input("MontoPago", sql.Decimal(18, 2),
-                    decimal(contrato.montoPago, "MontoPago"));
-                r.input("MontoContener", sql.Decimal(18, 2),
-                    decimal(contrato.montoContener, "MontoContener"));
-                r.input("MontoAbatir", sql.Decimal(18, 2),
-                    decimal(contrato.montoAbatir, "MontoAbatir"));
-                r.input("MontoCorriente", sql.Decimal(18, 2),
-                    decimal(contrato.montoCorriente, "MontoCorriente"));
-                r.input("Bucket", sql.NVarChar(50),
-                    texto(contrato.bucket, 50, "Bucket"));
-                r.input("DiasVencidos", sql.Int,
-                    entero(contrato.diasVencidos, "DiasVencidos"));
-                r.input("Segmento", sql.NVarChar(100),
-                    texto(contrato.segmento, 100, "Segmento"));
-                r.input("TipoProducto", sql.NVarChar(100),
-                    texto(contrato.tipoProducto, 100, "TipoProducto"));
-                r.input("NumPagosVdosProy", sql.Int,
-                    entero(contrato.numPagosVdosProy, "NumPagosVdosProy"));
-                r.input("SaldoContableInicial", sql.Decimal(18, 2),
-                    decimal(contrato.saldoContableInicial, "SaldoContableInicial"));
+                r.input(
+                    "IdClienteRecepcion",
+                    sql.BigInt,
+                    idClienteRecepcion
+                );
+
+                r.input(
+                    "NumeroEmpresa",
+                    sql.NVarChar(50),
+                    texto(contrato.numeroEmpresa, 50, "NumeroEmpresa")
+                );
+
+                r.input(
+                    "NumeroSucursal",
+                    sql.NVarChar(50),
+                    texto(contrato.numeroSucursal, 50, "NumeroSucursal")
+                );
+
+                r.input(
+                    "NumeroContrato",
+                    sql.NVarChar(50),
+                    texto(contrato.numeroContrato, 50, "NumeroContrato")
+                );
+
+                r.input(
+                    "NombreCliente",
+                    sql.NVarChar(200),
+                    texto(contrato.nombreCliente, 200, "NombreCliente")
+                );
+
+                r.input(
+                    "FrecuenciaPago",
+                    sql.NVarChar(50),
+                    texto(contrato.frecuenciaPago, 50, "FrecuenciaPago")
+                );
+
+                r.input(
+                    "CapitalInsoluto",
+                    sql.Decimal(18, 2),
+                    decimal(contrato.capitalInsoluto, "CapitalInsoluto")
+                );
+
+                r.input(
+                    "MontoPago",
+                    sql.Decimal(18, 2),
+                    decimal(contrato.montoPago, "MontoPago")
+                );
+
+                r.input(
+                    "MontoContener",
+                    sql.Decimal(18, 2),
+                    decimal(contrato.montoContener, "MontoContener")
+                );
+
+                r.input(
+                    "MontoAbatir",
+                    sql.Decimal(18, 2),
+                    decimal(contrato.montoAbatir, "MontoAbatir")
+                );
+
+                r.input(
+                    "MontoCorriente",
+                    sql.Decimal(18, 2),
+                    decimal(contrato.montoCorriente, "MontoCorriente")
+                );
+
+                r.input(
+                    "Bucket",
+                    sql.NVarChar(50),
+                    texto(contrato.bucket, 50, "Bucket")
+                );
+
+                r.input(
+                    "DiasVencidos",
+                    sql.Int,
+                    entero(contrato.diasVencidos, "DiasVencidos")
+                );
+
+                r.input(
+                    "Segmento",
+                    sql.NVarChar(100),
+                    texto(contrato.segmento, 100, "Segmento")
+                );
+
+                r.input(
+                    "TipoProducto",
+                    sql.NVarChar(100),
+                    texto(contrato.tipoProducto, 100, "TipoProducto")
+                );
+
+                r.input(
+                    "NumPagosVdosProy",
+                    sql.Int,
+                    entero(contrato.numPagosVdosProy, "NumPagosVdosProy")
+                );
+
+                r.input(
+                    "SaldoContableInicial",
+                    sql.Decimal(18, 2),
+                    decimal(
+                        contrato.saldoContableInicial,
+                        "SaldoContableInicial"
+                    )
+                );
 
                 await r.query(`
                     INSERT INTO dbo.RecepcionContratos
@@ -491,18 +617,30 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
             }
 
             // ======================================
-            // 4. INSERTAR TODOS LOS TELEFONOS
+            // 4. INSERTAR TELEFONOS VARIABLES
             // ======================================
 
             for (const telefono of item.telefonos) {
 
                 const r = new sql.Request(transaction);
 
-                r.input("IdClienteRecepcion", sql.BigInt, idClienteRecepcion);
-                r.input("TipoTelefono", sql.NVarChar(50),
-                    texto(telefono.tipoTelefono, 50, "TipoTelefono"));
-                r.input("Numero", sql.NVarChar(50),
-                    texto(telefono.numero, 50, "NumeroTelefono"));
+                r.input(
+                    "IdClienteRecepcion",
+                    sql.BigInt,
+                    idClienteRecepcion
+                );
+
+                r.input(
+                    "TipoTelefono",
+                    sql.NVarChar(50),
+                    texto(telefono.tipoTelefono, 50, "TipoTelefono")
+                );
+
+                r.input(
+                    "Numero",
+                    sql.NVarChar(50),
+                    texto(telefono.numero, 50, "NumeroTelefono")
+                );
 
                 await r.query(`
                     INSERT INTO dbo.RecepcionTelefonos
@@ -523,24 +661,48 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
             }
 
             // ======================================
-            // 5. INSERTAR TODAS LAS DIRECCIONES
+            // 5. INSERTAR DIRECCIONES VARIABLES
             // ======================================
 
             for (const direccion of item.direcciones) {
 
                 const r = new sql.Request(transaction);
 
-                r.input("IdClienteRecepcion", sql.BigInt, idClienteRecepcion);
-                r.input("Direccion", sql.NVarChar(300),
-                    texto(direccion.direccion, 300, "Direccion"));
-                r.input("Colonia", sql.NVarChar(150),
-                    texto(direccion.colonia, 150, "Colonia"));
-                r.input("CP", sql.NVarChar(10),
-                    texto(direccion.cp, 10, "CP"));
-                r.input("Estado", sql.NVarChar(100),
-                    texto(direccion.estado, 100, "Estado"));
-                r.input("TipoDireccion", sql.NVarChar(50),
-                    texto(direccion.tipoDireccion, 50, "TipoDireccion"));
+                r.input(
+                    "IdClienteRecepcion",
+                    sql.BigInt,
+                    idClienteRecepcion
+                );
+
+                r.input(
+                    "Direccion",
+                    sql.NVarChar(300),
+                    texto(direccion.direccion, 300, "Direccion")
+                );
+
+                r.input(
+                    "Colonia",
+                    sql.NVarChar(150),
+                    texto(direccion.colonia, 150, "Colonia")
+                );
+
+                r.input(
+                    "CP",
+                    sql.NVarChar(10),
+                    texto(direccion.cp, 10, "CP")
+                );
+
+                r.input(
+                    "Estado",
+                    sql.NVarChar(100),
+                    texto(direccion.estado, 100, "Estado")
+                );
+
+                r.input(
+                    "TipoDireccion",
+                    sql.NVarChar(50),
+                    texto(direccion.tipoDireccion, 50, "TipoDireccion")
+                );
 
                 await r.query(`
                     INSERT INTO dbo.RecepcionDirecciones
@@ -565,135 +727,166 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
 
                 direccionesInsertadas++;
             }
+
+            // ======================================
+            // 6. GENERAR LAYOUT CONSOLIDADO
+            // UNA FILA POR CONTRATO
+            // ======================================
+
+            const layoutRequest = new sql.Request(transaction);
+
+            layoutRequest.input(
+                "IdClienteRecepcion",
+                sql.BigInt,
+                idClienteRecepcion
+            );
+
+            const layoutRequestResult = await layoutRequest.query(`
+                INSERT INTO dbo.LayoutAsignaciones
+                (
+                    IdRecepcion,
+                    IdClienteRecepcion,
+                    NumeroCliente,
+                    Nombre,
+                    CURP,
+                    RFC,
+                    Correo,
+                    Ingresos,
+                    Sexo,
+                    NumeroEmpresa,
+                    NumeroSucursal,
+                    NumeroContrato,
+                    NombreCliente,
+                    FrecuenciaPago,
+                    CapitalInsoluto,
+                    MontoPago,
+                    MontoContener,
+                    MontoAbatir,
+                    MontoCorriente,
+                    Bucket,
+                    DiasVencidos,
+                    Segmento,
+                    TipoProducto,
+                    NumPagosVdosProy,
+                    SaldoContableInicial,
+                    Telefonos,
+                    Direcciones,
+                    NombreArchivo,
+                    FechaRegistro,
+                    ContenidoJSON
+                )
+                SELECT
+                    C.IdRecepcion,
+                    C.IdClienteRecepcion,
+                    C.NumeroCliente,
+                    C.Nombre,
+                    C.CURP,
+                    C.RFC,
+                    C.Correo,
+                    C.Ingresos,
+                    C.Sexo,
+                    CT.NumeroEmpresa,
+                    CT.NumeroSucursal,
+                    CT.NumeroContrato,
+                    CT.NombreCliente,
+                    CT.FrecuenciaPago,
+                    CT.CapitalInsoluto,
+                    CT.MontoPago,
+                    CT.MontoContener,
+                    CT.MontoAbatir,
+                    CT.MontoCorriente,
+                    CT.Bucket,
+                    CT.DiasVencidos,
+                    CT.Segmento,
+                    CT.TipoProducto,
+                    CT.NumPagosVdosProy,
+                    CT.SaldoContableInicial,
+                    T.Telefonos,
+                    D.Direcciones,
+                    R.NombreArchivo,
+                    R.FechaRegistro,
+                    R.ContenidoJSON
+
+                FROM dbo.RecepcionClientes C
+
+                INNER JOIN dbo.Recepciones R
+                    ON C.IdRecepcion = R.IdRecepcion
+
+                LEFT JOIN dbo.RecepcionContratos CT
+                    ON C.IdClienteRecepcion = CT.IdClienteRecepcion
+
+                OUTER APPLY
+                (
+                    SELECT
+                        STUFF((
+                            SELECT
+                                ' | ' +
+                                ISNULL(T2.TipoTelefono, '') +
+                                ': ' +
+                                ISNULL(T2.Numero, '')
+                            FROM dbo.RecepcionTelefonos T2
+                            WHERE T2.IdClienteRecepcion =
+                                C.IdClienteRecepcion
+                            FOR XML PATH(''), TYPE
+                        ).value('.', 'NVARCHAR(MAX)'), 1, 3, '')
+                        AS Telefonos
+                ) T
+
+                OUTER APPLY
+                (
+                    SELECT
+                        STUFF((
+                            SELECT
+                                ' | ' +
+                                ISNULL(D2.TipoDireccion, '') +
+                                ': ' +
+                                ISNULL(D2.Direccion, '') +
+                                ', ' +
+                                ISNULL(D2.Colonia, '') +
+                                ', ' +
+                                ISNULL(D2.Estado, '') +
+                                ', CP ' +
+                                ISNULL(D2.CP, '')
+                            FROM dbo.RecepcionDirecciones D2
+                            WHERE D2.IdClienteRecepcion =
+                                C.IdClienteRecepcion
+                            FOR XML PATH(''), TYPE
+                        ).value('.', 'NVARCHAR(MAX)'), 1, 3, '')
+                        AS Direcciones
+                ) D
+
+                WHERE C.IdClienteRecepcion = @IdClienteRecepcion;
+            `);
+
+            registrosLayout += layoutRequestResult.rowsAffected.reduce(
+                (total, cantidad) => total + cantidad,
+                0
+            );
         }
 
-// ======================================
-// 6. GENERAR LAYOUT CONSOLIDADO
-// ======================================
-
-const layoutRequest = new sql.Request(transaction);
-
-layoutRequest.input(
-    "IdClienteRecepcion",
-    sql.BigInt,
-    idClienteRecepcion
-);
-
-await layoutRequest.query(`
-    INSERT INTO dbo.LayoutAsignaciones
-    (
-        IdRecepcion,
-        IdClienteRecepcion,
-        NumeroCliente,
-        Nombre,
-        CURP,
-        RFC,
-        Correo,
-        Ingresos,
-        Sexo,
-        NumeroEmpresa,
-        NumeroSucursal,
-        NumeroContrato,
-        NombreCliente,
-        FrecuenciaPago,
-        CapitalInsoluto,
-        MontoPago,
-        MontoContener,
-        MontoAbatir,
-        MontoCorriente,
-        Bucket,
-        DiasVencidos,
-        Segmento,
-        TipoProducto,
-        NumPagosVdosProy,
-        SaldoContableInicial,
-        Telefonos,
-        Direcciones,
-        NombreArchivo,
-        FechaRegistro,
-        ContenidoJSON
-    )
-    SELECT
-        C.IdRecepcion,
-        C.IdClienteRecepcion,
-        C.NumeroCliente,
-        C.Nombre,
-        C.CURP,
-        C.RFC,
-        C.Correo,
-        C.Ingresos,
-        C.Sexo,
-        CT.NumeroEmpresa,
-        CT.NumeroSucursal,
-        CT.NumeroContrato,
-        CT.NombreCliente,
-        CT.FrecuenciaPago,
-        CT.CapitalInsoluto,
-        CT.MontoPago,
-        CT.MontoContener,
-        CT.MontoAbatir,
-        CT.MontoCorriente,
-        CT.Bucket,
-        CT.DiasVencidos,
-        CT.Segmento,
-        CT.TipoProducto,
-        CT.NumPagosVdosProy,
-        CT.SaldoContableInicial,
-        T.Telefonos,
-        D.Direcciones,
-        R.NombreArchivo,
-        R.FechaRegistro,
-        R.ContenidoJSON
-    FROM dbo.RecepcionClientes C
-    INNER JOIN dbo.Recepciones R
-        ON C.IdRecepcion = R.IdRecepcion
-    LEFT JOIN dbo.RecepcionContratos CT
-        ON C.IdClienteRecepcion = CT.IdClienteRecepcion
-    OUTER APPLY
-    (
-        SELECT STUFF((
-            SELECT ' | ' +
-                ISNULL(T2.TipoTelefono, '') +
-                ': ' + ISNULL(T2.Numero, '')
-            FROM dbo.RecepcionTelefonos T2
-            WHERE T2.IdClienteRecepcion = C.IdClienteRecepcion
-            FOR XML PATH(''), TYPE
-        ).value('.', 'NVARCHAR(MAX)'), 1, 3, '') AS Telefonos
-    ) T
-    OUTER APPLY
-    (
-        SELECT STUFF((
-            SELECT ' | ' +
-                ISNULL(D2.TipoDireccion, '') +
-                ': ' + ISNULL(D2.Direccion, '') +
-                ', ' + ISNULL(D2.Colonia, '') +
-                ', ' + ISNULL(D2.Estado, '') +
-                ', CP ' + ISNULL(D2.CP, '')
-            FROM dbo.RecepcionDirecciones D2
-            WHERE D2.IdClienteRecepcion = C.IdClienteRecepcion
-            FOR XML PATH(''), TYPE
-        ).value('.', 'NVARCHAR(MAX)'), 1, 3, '') AS Direcciones
-    ) D
-    WHERE C.IdClienteRecepcion = @IdClienteRecepcion;
-`);
-
         // ======================================
-        // CONFIRMAR TRANSACCION
+        // 7. CONFIRMAR TODA LA TRANSACCION
         // ======================================
 
         await transaction.commit();
         transactionIniciada = false;
 
         console.log("[POST] Recepcion guardada:", idRecepcion);
+        console.log("[POST] Registros del layout:", registrosLayout);
 
         return res.json({
             ok: true,
             mensaje: "JSON recibido y almacenado correctamente",
+
             idRecepcion: idRecepcion,
+
             clientesRecibidos: clientesInsertados,
             contratosInsertados: contratosInsertados,
             telefonosInsertados: telefonosInsertados,
             direccionesInsertadas: direccionesInsertadas,
+
+            registrosLayout: registrosLayout,
+
             jsonOriginalConservado: true
         });
 
@@ -703,7 +896,10 @@ await layoutRequest.query(`
             try {
                 await transaction.rollback();
             } catch (errorRollback) {
-                console.error("Error al revertir:", errorRollback);
+                console.error(
+                    "Error al revertir transaccion:",
+                    errorRollback
+                );
             }
         }
 
@@ -718,8 +914,7 @@ await layoutRequest.query(`
 });
 
 // ======================================
-// CONSULTA HISTORICA DE CLIENTE
-// NUEVA RUTA V2
+// CONSULTAR HISTORIAL DE CLIENTE
 // ======================================
 
 app.get("/api/v2/clientes/:numero", autenticar, async (req, res) => {
@@ -728,7 +923,11 @@ app.get("/api/v2/clientes/:numero", autenticar, async (req, res) => {
         const pool = await getPool();
 
         const resultado = await pool.request()
-            .input("NumeroCliente", sql.NVarChar(30), req.params.numero)
+            .input(
+                "NumeroCliente",
+                sql.NVarChar(30),
+                req.params.numero
+            )
             .query(`
                 SELECT
                     C.*,
@@ -755,32 +954,48 @@ app.get("/api/v2/clientes/:numero", autenticar, async (req, res) => {
 
             const id = cliente.IdClienteRecepcion;
 
-            const [contratos, telefonos, direcciones] = await Promise.all([
+            const [contratos, telefonos, direcciones] =
+                await Promise.all([
 
-                pool.request()
-                    .input("IdClienteRecepcion", sql.BigInt, id)
-                    .query(`
-                        SELECT *
-                        FROM dbo.RecepcionContratos
-                        WHERE IdClienteRecepcion = @IdClienteRecepcion;
-                    `),
+                    pool.request()
+                        .input(
+                            "IdClienteRecepcion",
+                            sql.BigInt,
+                            id
+                        )
+                        .query(`
+                            SELECT *
+                            FROM dbo.RecepcionContratos
+                            WHERE IdClienteRecepcion =
+                                @IdClienteRecepcion;
+                        `),
 
-                pool.request()
-                    .input("IdClienteRecepcion", sql.BigInt, id)
-                    .query(`
-                        SELECT *
-                        FROM dbo.RecepcionTelefonos
-                        WHERE IdClienteRecepcion = @IdClienteRecepcion;
-                    `),
+                    pool.request()
+                        .input(
+                            "IdClienteRecepcion",
+                            sql.BigInt,
+                            id
+                        )
+                        .query(`
+                            SELECT *
+                            FROM dbo.RecepcionTelefonos
+                            WHERE IdClienteRecepcion =
+                                @IdClienteRecepcion;
+                        `),
 
-                pool.request()
-                    .input("IdClienteRecepcion", sql.BigInt, id)
-                    .query(`
-                        SELECT *
-                        FROM dbo.RecepcionDirecciones
-                        WHERE IdClienteRecepcion = @IdClienteRecepcion;
-                    `)
-            ]);
+                    pool.request()
+                        .input(
+                            "IdClienteRecepcion",
+                            sql.BigInt,
+                            id
+                        )
+                        .query(`
+                            SELECT *
+                            FROM dbo.RecepcionDirecciones
+                            WHERE IdClienteRecepcion =
+                                @IdClienteRecepcion;
+                        `)
+                ]);
 
             historial.push({
                 recepcion: {
@@ -788,6 +1003,7 @@ app.get("/api/v2/clientes/:numero", autenticar, async (req, res) => {
                     nombreArchivo: cliente.NombreArchivo,
                     fechaRegistro: cliente.FechaRegistro
                 },
+
                 cliente: {
                     numero: cliente.NumeroCliente,
                     nombre: cliente.Nombre,
@@ -797,9 +1013,11 @@ app.get("/api/v2/clientes/:numero", autenticar, async (req, res) => {
                     ingresos: cliente.Ingresos,
                     sexo: cliente.Sexo
                 },
+
                 contrato: contratos.recordset,
                 telefono: telefonos.recordset,
                 direccion: direcciones.recordset,
+
                 contenidoJSONOriginal: cliente.ContenidoJSON
             });
         }
@@ -812,6 +1030,7 @@ app.get("/api/v2/clientes/:numero", autenticar, async (req, res) => {
         });
 
     } catch (error) {
+
         console.error("Error consultando historial:", error);
 
         return res.status(500).json({
@@ -824,7 +1043,7 @@ app.get("/api/v2/clientes/:numero", autenticar, async (req, res) => {
 
 // ======================================
 // CONSULTA ANTERIOR DE CLIENTES
-// SE CONSERVA PARA COMPATIBILIDAD
+// COMPATIBILIDAD CON TABLA ORIGINAL
 // ======================================
 
 app.get("/api/v1/clientes/:numero", autenticar, async (req, res) => {
@@ -833,7 +1052,11 @@ app.get("/api/v1/clientes/:numero", autenticar, async (req, res) => {
         const pool = await getPool();
 
         const resultado = await pool.request()
-            .input("NumeroCliente", sql.NVarChar(30), req.params.numero)
+            .input(
+                "NumeroCliente",
+                sql.NVarChar(30),
+                req.params.numero
+            )
             .query(`
                 SELECT *
                 FROM dbo.ClientesAsignacion
@@ -860,6 +1083,7 @@ app.get("/api/v1/clientes/:numero", autenticar, async (req, res) => {
         });
 
     } catch (error) {
+
         console.error("Error consultando cliente anterior:", error);
 
         return res.status(500).json({
@@ -877,4 +1101,3 @@ app.get("/api/v1/clientes/:numero", autenticar, async (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
     console.log(`API V2 activa en el puerto ${PORT}`);
 });
-
