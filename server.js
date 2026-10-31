@@ -1,13 +1,23 @@
+
 const express = require("express");
 const sql = require("mssql");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: "20mb" }));
+// ======================================
+// RECIBIR JSON Y CONSERVAR CUERPO ORIGINAL
+// ======================================
+
+app.use(express.json({
+    limit: "20mb",
+    verify: (req, res, buf) => {
+        req.rawBody = buf.toString("utf8");
+    }
+}));
 
 // ======================================
-// CONFIGURACION DE SQL SERVER 2008 SP2
+// CONFIGURACION SQL SERVER 2008 SP2
 // ======================================
 
 const dbConfig = {
@@ -19,8 +29,7 @@ const dbConfig = {
 
     options: {
         encrypt: process.env.DB_ENCRYPT === "true",
-        trustServerCertificate:
-            process.env.DB_TRUST_CERT === "true",
+        trustServerCertificate: process.env.DB_TRUST_CERT === "true",
         enableArithAbort: true
     },
 
@@ -34,7 +43,6 @@ const dbConfig = {
     requestTimeout: 120000
 };
 
-// Crear un solo pool de conexiones
 let poolPromise;
 
 function getPool() {
@@ -51,7 +59,7 @@ function getPool() {
 }
 
 // ======================================
-// SEGURIDAD API KEY
+// FUNCIONES DE VALIDACION
 // ======================================
 
 function autenticar(req, res, next) {
@@ -72,6 +80,75 @@ function autenticar(req, res, next) {
     }
 
     next();
+}
+
+function texto(valor, maximo, campo) {
+    if (valor === undefined || valor === null || valor === "") {
+        return null;
+    }
+
+    const resultado = String(valor);
+
+    if (resultado.length > maximo) {
+        throw new Error(
+            campo + " excede el máximo de " + maximo + " caracteres"
+        );
+    }
+
+    return resultado;
+}
+
+function decimal(valor, campo) {
+    if (valor === undefined || valor === null || valor === "") {
+        return null;
+    }
+
+    const numero = Number(valor);
+
+    if (!Number.isFinite(numero) ||
+        Math.abs(numero) >= 10000000000000000) {
+        throw new Error(campo + " contiene un valor decimal inválido");
+    }
+
+    return numero;
+}
+
+function entero(valor, campo) {
+    if (valor === undefined || valor === null || valor === "") {
+        return null;
+    }
+
+    const numero = Number(valor);
+
+    if (!Number.isSafeInteger(numero)) {
+        throw new Error(campo + " debe ser un número entero válido");
+    }
+
+    return numero;
+}
+
+function arreglo(valor, campo, numeroCliente) {
+    if (valor === undefined || valor === null) {
+        return [];
+    }
+
+    if (!Array.isArray(valor)) {
+        throw new Error(
+            campo + " debe ser un arreglo para el cliente " + numeroCliente
+        );
+    }
+
+    for (const elemento of valor) {
+        if (!elemento || typeof elemento !== "object" ||
+            Array.isArray(elemento)) {
+            throw new Error(
+                "Elemento inválido en " + campo +
+                " para el cliente " + numeroCliente
+            );
+        }
+    }
+
+    return valor;
 }
 
 // ======================================
@@ -102,7 +179,7 @@ app.get("/health", async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error de conexión SQL:", error);
+        console.error("Error SQL:", error);
 
         res.status(503).json({
             ok: false,
@@ -113,7 +190,8 @@ app.get("/health", async (req, res) => {
 });
 
 // ======================================
-// RECIBIR Y PROCESAR ASIGNACIONES
+// RECIBIR ASIGNACIONES
+// GUARDA HISTORICO Y DESGLOSA LOS DATOS
 // ======================================
 
 app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
@@ -122,7 +200,7 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
     let transactionIniciada = false;
 
     try {
-        console.log("[POST] Procesando asignaciones");
+        console.log("[POST] Recibiendo JSON de asignaciones");
 
         const datos = req.body;
 
@@ -133,53 +211,54 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
             });
         }
 
-        const clientesVistos = new Set();
+        // Validar toda la estructura antes de insertar
+        const clientesValidados = [];
 
-        // Validar estructura antes de modificar la base
         for (const item of datos) {
 
-            if (!item.cliente || item.cliente.numero === undefined ||
+            if (!item || typeof item !== "object" || Array.isArray(item)) {
+                throw new Error("Cada elemento debe ser un objeto de cliente");
+            }
+
+            if (!item.cliente ||
+                item.cliente.numero === undefined ||
                 item.cliente.numero === null ||
                 String(item.cliente.numero).trim() === "") {
-
-                return res.status(400).json({
-                    ok: false,
-                    mensaje: "Cada registro debe contener cliente.numero"
-                });
+                throw new Error("Cada registro debe contener cliente.numero");
             }
 
-            const numero = String(item.cliente.numero).trim();
+            const cliente = item.cliente;
+            const numero = String(cliente.numero).trim();
 
             if (numero.length > 30) {
-                return res.status(400).json({
-                    ok: false,
-                    mensaje: "NumeroCliente excede 30 caracteres",
-                    numeroCliente: numero
-                });
+                throw new Error(
+                    "NumeroCliente excede 30 caracteres: " + numero
+                );
             }
 
-            if (clientesVistos.has(numero)) {
-                return res.status(400).json({
-                    ok: false,
-                    mensaje: "NumeroCliente duplicado: " + numero
-                });
-            }
+            const contratos = arreglo(item.contrato, "contrato", numero);
+            const telefonos = arreglo(item.telefono, "telefono", numero);
+            const direcciones = arreglo(item.direccion, "direccion", numero);
 
-            clientesVistos.add(numero);
-
-            if (!Array.isArray(item.contrato) ||
-                !Array.isArray(item.telefono) ||
-                !Array.isArray(item.direccion)) {
-
-                return res.status(400).json({
-                    ok: false,
-                    mensaje: "Contrato, telefono y direccion deben ser arreglos",
-                    numeroCliente: numero
-                });
-            }
+            clientesValidados.push({
+                cliente,
+                numero,
+                contratos,
+                telefonos,
+                direcciones
+            });
         }
 
-        // Conectar a SQL Server
+        // Nombre del archivo enviado en el encabezado
+        const nombreArchivo = texto(
+            req.headers["x-filename"] || "archivo.json",
+            510,
+            "NombreArchivo"
+        );
+
+        // Guardar exactamente el texto JSON recibido
+        const contenidoJSON = req.rawBody || JSON.stringify(datos);
+
         const pool = await getPool();
 
         transaction = new sql.Transaction(pool);
@@ -187,148 +266,325 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
         await transaction.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
         transactionIniciada = true;
 
-        let insertados = 0;
-        let actualizados = 0;
+        // ======================================
+        // 1. GUARDAR RECEPCION ORIGINAL
+        // ======================================
 
-        for (const item of datos) {
+        const recepcionRequest = new sql.Request(transaction);
+
+        recepcionRequest.input(
+            "NombreArchivo",
+            sql.NVarChar(510),
+            nombreArchivo
+        );
+
+        recepcionRequest.input(
+            "ContenidoJSON",
+            sql.NVarChar(sql.MAX),
+            contenidoJSON
+        );
+
+        const recepcionResultado = await recepcionRequest.query(`
+            INSERT INTO dbo.Recepciones
+            (
+                NombreArchivo,
+                ContenidoJSON
+            )
+            VALUES
+            (
+                @NombreArchivo,
+                @ContenidoJSON
+            );
+
+            SELECT CAST(SCOPE_IDENTITY() AS BIGINT) AS IdRecepcion;
+        `);
+
+        const idRecepcion = recepcionResultado.recordset[0].IdRecepcion;
+
+        let clientesInsertados = 0;
+        let contratosInsertados = 0;
+        let telefonosInsertados = 0;
+        let direccionesInsertadas = 0;
+
+        // ======================================
+        // 2. PROCESAR CADA CLIENTE
+        // ======================================
+
+        for (const item of clientesValidados) {
 
             const cliente = item.cliente;
-            const numero = String(cliente.numero).trim();
 
-            const ingresos =
-                cliente.ingresos === null ||
-                cliente.ingresos === undefined ||
-                cliente.ingresos === ""
-                    ? null
-                    : Number(cliente.ingresos);
-
-            if (ingresos !== null &&
-                (!Number.isFinite(ingresos) ||
-                 Math.abs(ingresos) >= 100000000000000)) {
-
-                throw new Error(
-                    "Ingresos inválidos para cliente " + numero
-                );
-            }
-
-            const nombreArchivo =
-                String(req.headers["x-filename"] || "archivo.json")
-                    .substring(0, 510);
-
-            const request = new sql.Request(transaction);
-
-            request.input("NumeroCliente", sql.NVarChar(30), numero);
-            request.input("Nombre", sql.NVarChar(200), cliente.nombre || null);
-            request.input("CURP", sql.NVarChar(25), cliente.curp || null);
-            request.input("RFC", sql.NVarChar(20), cliente.rfc || null);
-            request.input("Correo", sql.NVarChar(200), cliente.correo || null);
-            request.input("Ingresos", sql.Decimal(18, 2), ingresos);
-            request.input("Sexo", sql.NVarChar(30), cliente.sexo || null);
-
-            request.input(
-                "ContratoJSON",
-                sql.NVarChar(sql.MAX),
-                JSON.stringify(item.contrato)
+            const ingresos = decimal(
+                cliente.ingresos,
+                "Ingresos del cliente " + item.numero
             );
 
-            request.input(
-                "TelefonoJSON",
-                sql.NVarChar(sql.MAX),
-                JSON.stringify(item.telefono)
+            const clienteRequest = new sql.Request(transaction);
+
+            clienteRequest.input(
+                "IdRecepcion",
+                sql.BigInt,
+                idRecepcion
             );
 
-            request.input(
-                "DireccionJSON",
-                sql.NVarChar(sql.MAX),
-                JSON.stringify(item.direccion)
+            clienteRequest.input(
+                "NumeroCliente",
+                sql.NVarChar(30),
+                item.numero
             );
 
-            request.input(
-                "NombreArchivo",
-                sql.NVarChar(510),
-                nombreArchivo
+            clienteRequest.input(
+                "Nombre",
+                sql.NVarChar(200),
+                texto(cliente.nombre, 200, "Nombre")
             );
 
-            const resultado = await request.query(`
-                DECLARE @Existe BIT;
-                SET @Existe = 0;
+            clienteRequest.input(
+                "CURP",
+                sql.NVarChar(25),
+                texto(cliente.curp, 25, "CURP")
+            );
 
-                IF EXISTS (
-                    SELECT 1
-                    FROM dbo.ClientesAsignacion WITH (UPDLOCK, HOLDLOCK)
-                    WHERE NumeroCliente = @NumeroCliente
+            clienteRequest.input(
+                "RFC",
+                sql.NVarChar(20),
+                texto(cliente.rfc, 20, "RFC")
+            );
+
+            clienteRequest.input(
+                "Correo",
+                sql.NVarChar(200),
+                texto(cliente.correo, 200, "Correo")
+            );
+
+            clienteRequest.input(
+                "Ingresos",
+                sql.Decimal(18, 2),
+                ingresos
+            );
+
+            clienteRequest.input(
+                "Sexo",
+                sql.NVarChar(30),
+                texto(cliente.sexo, 30, "Sexo")
+            );
+
+            const clienteResultado = await clienteRequest.query(`
+                INSERT INTO dbo.RecepcionClientes
+                (
+                    IdRecepcion,
+                    NumeroCliente,
+                    Nombre,
+                    CURP,
+                    RFC,
+                    Correo,
+                    Ingresos,
+                    Sexo
                 )
-                BEGIN
-                    SET @Existe = 1;
+                VALUES
+                (
+                    @IdRecepcion,
+                    @NumeroCliente,
+                    @Nombre,
+                    @CURP,
+                    @RFC,
+                    @Correo,
+                    @Ingresos,
+                    @Sexo
+                );
 
-                    UPDATE dbo.ClientesAsignacion
-                    SET
-                        Nombre = @Nombre,
-                        CURP = @CURP,
-                        RFC = @RFC,
-                        Correo = @Correo,
-                        Ingresos = @Ingresos,
-                        Sexo = @Sexo,
-                        ContratoJSON = @ContratoJSON,
-                        TelefonoJSON = @TelefonoJSON,
-                        DireccionJSON = @DireccionJSON,
-                        NombreArchivo = @NombreArchivo,
-                        FechaActualizacion = GETDATE()
-                    WHERE NumeroCliente = @NumeroCliente;
-                END
-                ELSE
-                BEGIN
-                    INSERT INTO dbo.ClientesAsignacion
+                SELECT CAST(SCOPE_IDENTITY() AS BIGINT)
+                    AS IdClienteRecepcion;
+            `);
+
+            const idClienteRecepcion =
+                clienteResultado.recordset[0].IdClienteRecepcion;
+
+            clientesInsertados++;
+
+            // ======================================
+            // 3. INSERTAR TODOS LOS CONTRATOS
+            // ======================================
+
+            for (const contrato of item.contratos) {
+
+                const r = new sql.Request(transaction);
+
+                r.input("IdClienteRecepcion", sql.BigInt, idClienteRecepcion);
+                r.input("NumeroEmpresa", sql.NVarChar(50),
+                    texto(contrato.numeroEmpresa, 50, "NumeroEmpresa"));
+                r.input("NumeroSucursal", sql.NVarChar(50),
+                    texto(contrato.numeroSucursal, 50, "NumeroSucursal"));
+                r.input("NumeroContrato", sql.NVarChar(50),
+                    texto(contrato.numeroContrato, 50, "NumeroContrato"));
+                r.input("NombreCliente", sql.NVarChar(200),
+                    texto(contrato.nombreCliente, 200, "NombreCliente"));
+                r.input("FrecuenciaPago", sql.NVarChar(50),
+                    texto(contrato.frecuenciaPago, 50, "FrecuenciaPago"));
+                r.input("CapitalInsoluto", sql.Decimal(18, 2),
+                    decimal(contrato.capitalInsoluto, "CapitalInsoluto"));
+                r.input("MontoPago", sql.Decimal(18, 2),
+                    decimal(contrato.montoPago, "MontoPago"));
+                r.input("MontoContener", sql.Decimal(18, 2),
+                    decimal(contrato.montoContener, "MontoContener"));
+                r.input("MontoAbatir", sql.Decimal(18, 2),
+                    decimal(contrato.montoAbatir, "MontoAbatir"));
+                r.input("MontoCorriente", sql.Decimal(18, 2),
+                    decimal(contrato.montoCorriente, "MontoCorriente"));
+                r.input("Bucket", sql.NVarChar(50),
+                    texto(contrato.bucket, 50, "Bucket"));
+                r.input("DiasVencidos", sql.Int,
+                    entero(contrato.diasVencidos, "DiasVencidos"));
+                r.input("Segmento", sql.NVarChar(100),
+                    texto(contrato.segmento, 100, "Segmento"));
+                r.input("TipoProducto", sql.NVarChar(100),
+                    texto(contrato.tipoProducto, 100, "TipoProducto"));
+                r.input("NumPagosVdosProy", sql.Int,
+                    entero(contrato.numPagosVdosProy, "NumPagosVdosProy"));
+                r.input("SaldoContableInicial", sql.Decimal(18, 2),
+                    decimal(contrato.saldoContableInicial, "SaldoContableInicial"));
+
+                await r.query(`
+                    INSERT INTO dbo.RecepcionContratos
                     (
-                        NumeroCliente,
-                        Nombre,
-                        CURP,
-                        RFC,
-                        Correo,
-                        Ingresos,
-                        Sexo,
-                        ContratoJSON,
-                        TelefonoJSON,
-                        DireccionJSON,
-                        NombreArchivo
+                        IdClienteRecepcion,
+                        NumeroEmpresa,
+                        NumeroSucursal,
+                        NumeroContrato,
+                        NombreCliente,
+                        FrecuenciaPago,
+                        CapitalInsoluto,
+                        MontoPago,
+                        MontoContener,
+                        MontoAbatir,
+                        MontoCorriente,
+                        Bucket,
+                        DiasVencidos,
+                        Segmento,
+                        TipoProducto,
+                        NumPagosVdosProy,
+                        SaldoContableInicial
                     )
                     VALUES
                     (
-                        @NumeroCliente,
-                        @Nombre,
-                        @CURP,
-                        @RFC,
-                        @Correo,
-                        @Ingresos,
-                        @Sexo,
-                        @ContratoJSON,
-                        @TelefonoJSON,
-                        @DireccionJSON,
-                        @NombreArchivo
+                        @IdClienteRecepcion,
+                        @NumeroEmpresa,
+                        @NumeroSucursal,
+                        @NumeroContrato,
+                        @NombreCliente,
+                        @FrecuenciaPago,
+                        @CapitalInsoluto,
+                        @MontoPago,
+                        @MontoContener,
+                        @MontoAbatir,
+                        @MontoCorriente,
+                        @Bucket,
+                        @DiasVencidos,
+                        @Segmento,
+                        @TipoProducto,
+                        @NumPagosVdosProy,
+                        @SaldoContableInicial
                     );
-                END;
+                `);
 
-                SELECT @Existe AS YaExistia;
-            `);
+                contratosInsertados++;
+            }
 
-            if (resultado.recordset[0].YaExistia) {
-                actualizados++;
-            } else {
-                insertados++;
+            // ======================================
+            // 4. INSERTAR TODOS LOS TELEFONOS
+            // ======================================
+
+            for (const telefono of item.telefonos) {
+
+                const r = new sql.Request(transaction);
+
+                r.input("IdClienteRecepcion", sql.BigInt, idClienteRecepcion);
+                r.input("TipoTelefono", sql.NVarChar(50),
+                    texto(telefono.tipoTelefono, 50, "TipoTelefono"));
+                r.input("Numero", sql.NVarChar(50),
+                    texto(telefono.numero, 50, "NumeroTelefono"));
+
+                await r.query(`
+                    INSERT INTO dbo.RecepcionTelefonos
+                    (
+                        IdClienteRecepcion,
+                        TipoTelefono,
+                        Numero
+                    )
+                    VALUES
+                    (
+                        @IdClienteRecepcion,
+                        @TipoTelefono,
+                        @Numero
+                    );
+                `);
+
+                telefonosInsertados++;
+            }
+
+            // ======================================
+            // 5. INSERTAR TODAS LAS DIRECCIONES
+            // ======================================
+
+            for (const direccion of item.direcciones) {
+
+                const r = new sql.Request(transaction);
+
+                r.input("IdClienteRecepcion", sql.BigInt, idClienteRecepcion);
+                r.input("Direccion", sql.NVarChar(300),
+                    texto(direccion.direccion, 300, "Direccion"));
+                r.input("Colonia", sql.NVarChar(150),
+                    texto(direccion.colonia, 150, "Colonia"));
+                r.input("CP", sql.NVarChar(10),
+                    texto(direccion.cp, 10, "CP"));
+                r.input("Estado", sql.NVarChar(100),
+                    texto(direccion.estado, 100, "Estado"));
+                r.input("TipoDireccion", sql.NVarChar(50),
+                    texto(direccion.tipoDireccion, 50, "TipoDireccion"));
+
+                await r.query(`
+                    INSERT INTO dbo.RecepcionDirecciones
+                    (
+                        IdClienteRecepcion,
+                        Direccion,
+                        Colonia,
+                        CP,
+                        Estado,
+                        TipoDireccion
+                    )
+                    VALUES
+                    (
+                        @IdClienteRecepcion,
+                        @Direccion,
+                        @Colonia,
+                        @CP,
+                        @Estado,
+                        @TipoDireccion
+                    );
+                `);
+
+                direccionesInsertadas++;
             }
         }
+
+        // ======================================
+        // CONFIRMAR TRANSACCION
+        // ======================================
 
         await transaction.commit();
         transactionIniciada = false;
 
-        console.log("[POST] Proceso terminado correctamente");
+        console.log("[POST] Recepcion guardada:", idRecepcion);
 
         return res.json({
             ok: true,
-            mensaje: "Asignaciones procesadas correctamente",
-            clientesRecibidos: datos.length,
-            clientesInsertados: insertados,
-            clientesActualizados: actualizados
+            mensaje: "JSON recibido y almacenado correctamente",
+            idRecepcion: idRecepcion,
+            clientesRecibidos: clientesInsertados,
+            contratosInsertados: contratosInsertados,
+            telefonosInsertados: telefonosInsertados,
+            direccionesInsertadas: direccionesInsertadas,
+            jsonOriginalConservado: true
         });
 
     } catch (error) {
@@ -352,35 +608,138 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
 });
 
 // ======================================
-// CONSULTAR CLIENTE POR NUMERO
+// CONSULTA HISTORICA DE CLIENTE
+// NUEVA RUTA V2
 // ======================================
 
-app.get("/api/v1/clientes/:numero", autenticar, async (req, res) => {
+app.get("/api/v2/clientes/:numero", autenticar, async (req, res) => {
+
     try {
         const pool = await getPool();
 
         const resultado = await pool.request()
-            .input(
-                "NumeroCliente",
-                sql.NVarChar(30),
-                req.params.numero
-            )
+            .input("NumeroCliente", sql.NVarChar(30), req.params.numero)
             .query(`
-                SELECT *
-                FROM dbo.ClientesAsignacion
-                WHERE NumeroCliente = @NumeroCliente
+                SELECT
+                    C.*,
+                    R.NombreArchivo,
+                    R.FechaRegistro,
+                    R.ContenidoJSON
+                FROM dbo.RecepcionClientes C
+                INNER JOIN dbo.Recepciones R
+                    ON C.IdRecepcion = R.IdRecepcion
+                WHERE C.NumeroCliente = @NumeroCliente
+                ORDER BY C.IdClienteRecepcion DESC;
             `);
 
         if (resultado.recordset.length === 0) {
             return res.status(404).json({
                 ok: false,
-                mensaje: "Cliente no encontrado"
+                mensaje: "Cliente no encontrado en el historial"
+            });
+        }
+
+        const historial = [];
+
+        for (const cliente of resultado.recordset) {
+
+            const id = cliente.IdClienteRecepcion;
+
+            const [contratos, telefonos, direcciones] = await Promise.all([
+
+                pool.request()
+                    .input("IdClienteRecepcion", sql.BigInt, id)
+                    .query(`
+                        SELECT *
+                        FROM dbo.RecepcionContratos
+                        WHERE IdClienteRecepcion = @IdClienteRecepcion;
+                    `),
+
+                pool.request()
+                    .input("IdClienteRecepcion", sql.BigInt, id)
+                    .query(`
+                        SELECT *
+                        FROM dbo.RecepcionTelefonos
+                        WHERE IdClienteRecepcion = @IdClienteRecepcion;
+                    `),
+
+                pool.request()
+                    .input("IdClienteRecepcion", sql.BigInt, id)
+                    .query(`
+                        SELECT *
+                        FROM dbo.RecepcionDirecciones
+                        WHERE IdClienteRecepcion = @IdClienteRecepcion;
+                    `)
+            ]);
+
+            historial.push({
+                recepcion: {
+                    idRecepcion: cliente.IdRecepcion,
+                    nombreArchivo: cliente.NombreArchivo,
+                    fechaRegistro: cliente.FechaRegistro
+                },
+                cliente: {
+                    numero: cliente.NumeroCliente,
+                    nombre: cliente.Nombre,
+                    curp: cliente.CURP,
+                    rfc: cliente.RFC,
+                    correo: cliente.Correo,
+                    ingresos: cliente.Ingresos,
+                    sexo: cliente.Sexo
+                },
+                contrato: contratos.recordset,
+                telefono: telefonos.recordset,
+                direccion: direcciones.recordset,
+                contenidoJSONOriginal: cliente.ContenidoJSON
+            });
+        }
+
+        return res.json({
+            ok: true,
+            numeroCliente: req.params.numero,
+            recepcionesEncontradas: historial.length,
+            historial: historial
+        });
+
+    } catch (error) {
+        console.error("Error consultando historial:", error);
+
+        return res.status(500).json({
+            ok: false,
+            mensaje: "Error al consultar historial",
+            detalle: error.message
+        });
+    }
+});
+
+// ======================================
+// CONSULTA ANTERIOR DE CLIENTES
+// SE CONSERVA PARA COMPATIBILIDAD
+// ======================================
+
+app.get("/api/v1/clientes/:numero", autenticar, async (req, res) => {
+
+    try {
+        const pool = await getPool();
+
+        const resultado = await pool.request()
+            .input("NumeroCliente", sql.NVarChar(30), req.params.numero)
+            .query(`
+                SELECT *
+                FROM dbo.ClientesAsignacion
+                WHERE NumeroCliente = @NumeroCliente;
+            `);
+
+        if (resultado.recordset.length === 0) {
+            return res.status(404).json({
+                ok: false,
+                mensaje: "Cliente no encontrado en la tabla anterior"
             });
         }
 
         const cliente = resultado.recordset[0];
 
-        res.json({
+        return res.json({
             ok: true,
             cliente: {
                 ...cliente,
@@ -391,9 +750,9 @@ app.get("/api/v1/clientes/:numero", autenticar, async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error consultando cliente:", error);
+        console.error("Error consultando cliente anterior:", error);
 
-        res.status(500).json({
+        return res.status(500).json({
             ok: false,
             mensaje: "Error al consultar cliente",
             detalle: error.message
@@ -408,3 +767,4 @@ app.get("/api/v1/clientes/:numero", autenticar, async (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
     console.log(`API V2 activa en el puerto ${PORT}`);
 });
+
