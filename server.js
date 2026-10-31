@@ -567,6 +567,116 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
             }
         }
 
+// ======================================
+// 6. GENERAR LAYOUT CONSOLIDADO
+// ======================================
+
+const layoutRequest = new sql.Request(transaction);
+
+layoutRequest.input(
+    "IdClienteRecepcion",
+    sql.BigInt,
+    idClienteRecepcion
+);
+
+await layoutRequest.query(`
+    INSERT INTO dbo.LayoutAsignaciones
+    (
+        IdRecepcion,
+        IdClienteRecepcion,
+        NumeroCliente,
+        Nombre,
+        CURP,
+        RFC,
+        Correo,
+        Ingresos,
+        Sexo,
+        NumeroEmpresa,
+        NumeroSucursal,
+        NumeroContrato,
+        NombreCliente,
+        FrecuenciaPago,
+        CapitalInsoluto,
+        MontoPago,
+        MontoContener,
+        MontoAbatir,
+        MontoCorriente,
+        Bucket,
+        DiasVencidos,
+        Segmento,
+        TipoProducto,
+        NumPagosVdosProy,
+        SaldoContableInicial,
+        Telefonos,
+        Direcciones,
+        NombreArchivo,
+        FechaRegistro,
+        ContenidoJSON
+    )
+    SELECT
+        C.IdRecepcion,
+        C.IdClienteRecepcion,
+        C.NumeroCliente,
+        C.Nombre,
+        C.CURP,
+        C.RFC,
+        C.Correo,
+        C.Ingresos,
+        C.Sexo,
+        CT.NumeroEmpresa,
+        CT.NumeroSucursal,
+        CT.NumeroContrato,
+        CT.NombreCliente,
+        CT.FrecuenciaPago,
+        CT.CapitalInsoluto,
+        CT.MontoPago,
+        CT.MontoContener,
+        CT.MontoAbatir,
+        CT.MontoCorriente,
+        CT.Bucket,
+        CT.DiasVencidos,
+        CT.Segmento,
+        CT.TipoProducto,
+        CT.NumPagosVdosProy,
+        CT.SaldoContableInicial,
+        T.Telefonos,
+        D.Direcciones,
+        R.NombreArchivo,
+        R.FechaRegistro,
+        R.ContenidoJSON
+    FROM dbo.RecepcionClientes C
+    INNER JOIN dbo.Recepciones R
+        ON C.IdRecepcion = R.IdRecepcion
+    LEFT JOIN dbo.RecepcionContratos CT
+        ON C.IdClienteRecepcion = CT.IdClienteRecepcion
+    OUTER APPLY
+    (
+        SELECT STUFF((
+            SELECT ' | ' +
+                ISNULL(T2.TipoTelefono, '') +
+                ': ' + ISNULL(T2.Numero, '')
+            FROM dbo.RecepcionTelefonos T2
+            WHERE T2.IdClienteRecepcion = C.IdClienteRecepcion
+            FOR XML PATH(''), TYPE
+        ).value('.', 'NVARCHAR(MAX)'), 1, 3, '') AS Telefonos
+    ) T
+    OUTER APPLY
+    (
+        SELECT STUFF((
+            SELECT ' | ' +
+                ISNULL(D2.TipoDireccion, '') +
+                ': ' + ISNULL(D2.Direccion, '') +
+                ', ' + ISNULL(D2.Colonia, '') +
+                ', ' + ISNULL(D2.Estado, '') +
+                ', CP ' + ISNULL(D2.CP, '')
+            FROM dbo.RecepcionDirecciones D2
+            WHERE D2.IdClienteRecepcion = C.IdClienteRecepcion
+            FOR XML PATH(''), TYPE
+        ).value('.', 'NVARCHAR(MAX)'), 1, 3, '') AS Direcciones
+    ) D
+    WHERE C.IdClienteRecepcion = @IdClienteRecepcion;
+`);
+
         // ======================================
         // CONFIRMAR TRANSACCION
         // ======================================
