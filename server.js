@@ -1,5 +1,4 @@
 
-
 const express = require("express");
 const sql = require("mssql");
 
@@ -134,6 +133,22 @@ function entero(valor, campo) {
     }
 
     return numero;
+}
+
+function fecha(valor, campo) {
+    if (valor === undefined || valor === null || valor === "") return null;
+    const valorTexto = String(valor).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(valorTexto)) {
+        throw new Error(campo + " debe tener formato YYYY-MM-DD");
+    }
+    const [anio, mes, dia] = valorTexto.split("-").map(Number);
+    const comprobacion = new Date(Date.UTC(anio, mes - 1, dia));
+    if (comprobacion.getUTCFullYear() !== anio ||
+        comprobacion.getUTCMonth() !== mes - 1 ||
+        comprobacion.getUTCDate() !== dia) {
+        throw new Error(campo + " contiene una fecha inválida");
+    }
+    return new Date(Date.UTC(anio, mes - 1, dia));
 }
 
 function arreglo(valor, campo, numeroCliente) {
@@ -564,11 +579,27 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
                 r.input(
                     "SaldoContableInicial",
                     sql.Decimal(18, 2),
-                    decimal(
-                        contrato.saldoContableInicial,
-                        "SaldoContableInicial"
-                    )
+                    decimal(contrato.saldoContableInicial, "SaldoContableInicial")
                 );
+                r.input("SaldoVencido", sql.Decimal(18, 2), decimal(contrato.saldoVencido, "SaldoVencido"));
+                r.input("NumPagosVencidos", sql.Int, entero(contrato.numPagosVencidos, "NumPagosVencidos"));
+                r.input("NumPagosVencidosIniciales", sql.Int, entero(contrato.numPagosVencidosIniciales, "NumPagosVencidosIniciales"));
+                r.input("FechaInicio", sql.Date, fecha(contrato.fechaInicio, "FechaInicio"));
+                r.input("FechaFin", sql.Date, fecha(contrato.fechaFin, "FechaFin"));
+                r.input("ReferenciaSTP", sql.NVarChar(50), texto(contrato.referenciaSTP, 50, "ReferenciaSTP"));
+                r.input("Estatus", sql.NVarChar(50), texto(contrato.estatus, 50, "Estatus"));
+                r.input("Asignacion", sql.NVarChar(100), texto(contrato.asignacion, 100, "Asignacion"));
+                r.input("IdProducto", sql.NVarChar(50), texto(contrato.id_producto, 50, "IdProducto"));
+                r.input("SubEstrategia", sql.NVarChar(100), texto(contrato.subEstrategia, 100, "SubEstrategia"));
+                r.input("DescSubEstrategia", sql.NVarChar(250), texto(contrato.desc_subestrategia, 250, "DescSubEstrategia"));
+                r.input("Riesgo", sql.NVarChar(20), texto(contrato.riesgo, 20, "Riesgo"));
+                r.input("Quitas", sql.NVarChar(100), texto(contrato.quitas, 100, "Quitas"));
+                r.input("DiasVencidosInicial", sql.Int, entero(contrato.diasVencidosInicial, "DiasVencidosInicial"));
+                r.input("ClienteCurp", sql.NVarChar(30), texto(contrato.clienteCurp, 30, "ClienteCurp"));
+                r.input("NombreSucursal", sql.NVarChar(150), texto(contrato.nombreSucursal, 150, "NombreSucursal"));
+                r.input("Domiciliado", sql.NVarChar(10), texto(contrato.domiciliado, 10, "Domiciliado"));
+                r.input("MontoUltimoPago", sql.Decimal(18, 2), decimal(contrato.montoUltimoPago, "MontoUltimoPago"));
+                r.input("MontoRecuperado", sql.Decimal(18, 2), decimal(contrato.montoRecuperado, "MontoRecuperado"));
 
                 await r.query(`
                     INSERT INTO dbo.RecepcionContratos
@@ -589,7 +620,26 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
                         Segmento,
                         TipoProducto,
                         NumPagosVdosProy,
-                        SaldoContableInicial
+                        SaldoContableInicial,
+                        SaldoVencido,
+                        NumPagosVencidos,
+                        NumPagosVencidosIniciales,
+                        FechaInicio,
+                        FechaFin,
+                        ReferenciaSTP,
+                        Estatus,
+                        Asignacion,
+                        IdProducto,
+                        SubEstrategia,
+                        DescSubEstrategia,
+                        Riesgo,
+                        Quitas,
+                        DiasVencidosInicial,
+                        ClienteCurp,
+                        NombreSucursal,
+                        Domiciliado,
+                        MontoUltimoPago,
+                        MontoRecuperado
                     )
                     VALUES
                     (
@@ -609,7 +659,26 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
                         @Segmento,
                         @TipoProducto,
                         @NumPagosVdosProy,
-                        @SaldoContableInicial
+                        @SaldoContableInicial,
+                        @SaldoVencido,
+                        @NumPagosVencidos,
+                        @NumPagosVencidosIniciales,
+                        @FechaInicio,
+                        @FechaFin,
+                        @ReferenciaSTP,
+                        @Estatus,
+                        @Asignacion,
+                        @IdProducto,
+                        @SubEstrategia,
+                        @DescSubEstrategia,
+                        @Riesgo,
+                        @Quitas,
+                        @DiasVencidosInicial,
+                        @ClienteCurp,
+                        @NombreSucursal,
+                        @Domiciliado,
+                        @MontoUltimoPago,
+                        @MontoRecuperado
                     );
                 `);
 
@@ -769,6 +838,25 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
                     TipoProducto,
                     NumPagosVdosProy,
                     SaldoContableInicial,
+                    SaldoVencido,
+                    NumPagosVencidos,
+                    NumPagosVencidosIniciales,
+                    FechaInicio,
+                    FechaFin,
+                    ReferenciaSTP,
+                    Estatus,
+                    Asignacion,
+                    IdProducto,
+                    SubEstrategia,
+                    DescSubEstrategia,
+                    Riesgo,
+                    Quitas,
+                    DiasVencidosInicial,
+                    ClienteCurp,
+                    NombreSucursal,
+                    Domiciliado,
+                    MontoUltimoPago,
+                    MontoRecuperado,
                     Telefonos,
                     Direcciones,
                     NombreArchivo,
@@ -801,6 +889,25 @@ app.post("/api/v1/asignaciones", autenticar, async (req, res) => {
                     CT.TipoProducto,
                     CT.NumPagosVdosProy,
                     CT.SaldoContableInicial,
+                    CT.SaldoVencido,
+                    CT.NumPagosVencidos,
+                    CT.NumPagosVencidosIniciales,
+                    CT.FechaInicio,
+                    CT.FechaFin,
+                    CT.ReferenciaSTP,
+                    CT.Estatus,
+                    CT.Asignacion,
+                    CT.IdProducto,
+                    CT.SubEstrategia,
+                    CT.DescSubEstrategia,
+                    CT.Riesgo,
+                    CT.Quitas,
+                    CT.DiasVencidosInicial,
+                    CT.ClienteCurp,
+                    CT.NombreSucursal,
+                    CT.Domiciliado,
+                    CT.MontoUltimoPago,
+                    CT.MontoRecuperado,
                     T.Telefonos,
                     D.Direcciones,
                     R.NombreArchivo,
@@ -1101,3 +1208,4 @@ app.get("/api/v1/clientes/:numero", autenticar, async (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
     console.log(`API V2 activa en el puerto ${PORT}`);
 });
+
